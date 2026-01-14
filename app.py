@@ -5,6 +5,7 @@ import pandas as pd
 import json
 import re
 from fpdf import FPDF
+import pypdf
 import io
 
 # ==========================================
@@ -33,17 +34,37 @@ RJAIA_LIBRARY = {
 }
 
 # ==========================================
-# 2. MOTOR DE PDF (FPDF)
+# 2. MOTOR DE PDF (Extrator e Gerador)
 # ==========================================
 
+# --- A. Leitura do PDF de Input ---
+def read_pdf(file):
+    """Extrai texto de um ficheiro PDF."""
+    try:
+        reader = pypdf.PdfReader(file)
+        text = ""
+        for page in reader.pages:
+            extracted = page.extract_text()
+            if extracted:
+                text += extracted + "\n"
+        return text
+    except Exception as e:
+        return f"Erro ao ler PDF: {e}"
+
+# --- B. Leitura do Word de Input ---
+def read_docx(file):
+    """Extrai texto de um ficheiro DOCX."""
+    doc = Document(file)
+    full_text = [para.text for para in doc.paragraphs if para.text.strip()]
+    return "\n".join(full_text)
+
+# --- C. Geração do Relatório PDF (Output) ---
 class PDFReport(FPDF):
     def header(self):
-        # Título
         self.set_font('Arial', 'B', 14)
         self.cell(0, 10, 'Relatorio de Auditoria PTF - RJAIA (IA)', 0, 1, 'C')
         self.ln(5)
-        # Linha separadora
-        self.set_draw_color(0, 80, 180) # Azul APA
+        self.set_draw_color(0, 80, 180) 
         self.set_line_width(0.5)
         self.line(10, 25, 200, 25)
         self.ln(10)
@@ -52,32 +73,28 @@ class PDFReport(FPDF):
         self.set_y(-15)
         self.set_font('Arial', 'I', 8)
         self.set_text_color(128)
-        self.cell(0, 10, f'Pagina {self.page_no()} - Gerado por Analisador RJAIA AI', 0, 0, 'C')
+        self.cell(0, 10, f'Pagina {self.page_no()}', 0, 0, 'C')
 
-def create_pdf(df):
-    """Gera o binário do PDF a partir do DataFrame."""
+def create_pdf_report(df):
     pdf = PDFReport()
     pdf.add_page()
     pdf.set_auto_page_break(auto=True, margin=15)
     
-    # Resumo Executivo
+    # Resumo
     pdf.set_font('Arial', 'B', 12)
-    pdf.set_text_color(0, 0, 0)
     pdf.cell(0, 10, 'Resumo Executivo', 0, 1)
     
+    pdf.set_font('Arial', '', 10)
     total = len(df)
     graves = len(df[df['gravidade'].str.contains('Alta|Grave', case=False, na=False)])
-    
-    pdf.set_font('Arial', '', 10)
     pdf.cell(0, 6, f"Total de Observacoes: {total}", 0, 1)
     pdf.cell(0, 6, f"Desconformidades Graves: {graves}", 0, 1)
     pdf.ln(5)
 
-    # Tabela de Observações
+    # Detalhes
     pdf.set_font('Arial', 'B', 12)
     pdf.cell(0, 10, 'Detalhe das Observacoes', 0, 1)
     
-    # Função auxiliar para lidar com caracteres portugueses no FPDF padrão
     def safe_txt(text):
         try:
             return text.encode('latin-1', 'replace').decode('latin-1')
@@ -85,12 +102,9 @@ def create_pdf(df):
             return str(text)
 
     for index, row in df.iterrows():
-        # Caixa da Linha
         pdf.set_font('Arial', 'B', 10)
-        
-        # Cor baseada na gravidade
         if "Alta" in str(row.get('gravidade', '')):
-            pdf.set_text_color(200, 0, 0) # Vermelho
+            pdf.set_text_color(200, 0, 0)
             icon = "[!]"
         else:
             pdf.set_text_color(0, 0, 0)
@@ -99,40 +113,29 @@ def create_pdf(df):
         title = f"{icon} {safe_txt(row.get('categoria', 'Geral'))} ({safe_txt(row.get('gravidade', '-'))})"
         pdf.cell(0, 8, title, 0, 1)
         
-        # Conteúdo
         pdf.set_font('Arial', '', 9)
         pdf.set_text_color(50, 50, 50)
         
-        texto_orig = safe_txt(f"Texto Original: {row.get('texto_detetado', 'N/A')}")
-        problema = safe_txt(f"Problema: {row.get('problema', 'N/A')}")
-        sugestao = safe_txt(f"Sugestao: {row.get('sugestao', 'N/A')}")
-        
-        # Multi_cell para quebra de linha
-        pdf.multi_cell(0, 5, texto_orig)
-        pdf.multi_cell(0, 5, problema)
+        pdf.multi_cell(0, 5, safe_txt(f"Texto Original: {row.get('texto_detetado', 'N/A')}"))
+        pdf.multi_cell(0, 5, safe_txt(f"Problema: {row.get('problema', 'N/A')}"))
         
         pdf.set_font('Arial', 'I', 9)
-        pdf.set_text_color(0, 100, 0) # Verde escuro
-        pdf.multi_cell(0, 5, sugestao)
+        pdf.set_text_color(0, 100, 0) 
+        pdf.multi_cell(0, 5, safe_txt(f"Sugestao: {row.get('sugestao', 'N/A')}"))
         
         pdf.ln(3)
-        pdf.set_draw_color(200, 200, 200)
+        pdf.set_draw_color(220, 220, 220)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(3)
 
     return pdf.output(dest='S').encode('latin-1')
 
 # ==========================================
-# 3. LÓGICA DE BACKEND E AI
+# 3. LÓGICA AI (GEMINI)
 # ==========================================
 
 def get_library_context():
     return json.dumps(RJAIA_LIBRARY, ensure_ascii=False, indent=2)
-
-def read_docx(file):
-    doc = Document(file)
-    full_text = [para.text for para in doc.paragraphs if para.text.strip()]
-    return "\n".join(full_text)
 
 def clean_json_string(json_str):
     cleaned = re.sub(r"```json\s*", "", json_str)
@@ -147,12 +150,12 @@ def analyze_ptf_expert(text, api_key, model_name):
     Tu és um Auditor Técnico da APA (Agência Portuguesa do Ambiente).
     BIBLIOTECA LEGAL: {library_context}
     
-    INSTRUÇÃO: Analisa o PTF procurando:
+    INSTRUÇÃO: Analisa o PTF fornecido procurando:
     1. Legislação desatualizada ou incorreta (cruzar com a Biblioteca).
     2. Menção obrigatória ao DL 11/2023 (Simplex).
     3. Erros de português ou linguagem não técnica.
     
-    OUTPUT JSON:
+    OUTPUT JSON (Lista estrita):
     [
       {{
         "categoria": "Legislação",
@@ -174,10 +177,10 @@ def analyze_ptf_expert(text, api_key, model_name):
         return json.dumps({"erro_sistema": str(e)})
 
 # ==========================================
-# 4. INTERFACE STREAMLIT
+# 4. INTERFACE
 # ==========================================
 
-st.set_page_config(page_title="RJAIA Expert PDF", page_icon="📄", layout="wide")
+st.set_page_config(page_title="RJAIA Expert (PDF/Docx)", page_icon="📑", layout="wide")
 
 st.sidebar.title("⚙️ Configuração")
 api_key = st.sidebar.text_input("Google API Key", type="password")
@@ -186,7 +189,6 @@ model_options = ["models/gemini-1.5-flash"]
 if api_key:
     try:
         genai.configure(api_key=api_key)
-        # Lista modelos disponíveis
         ms = [m.name for m in genai.list_models() if 'generateContent' in m.supported_generation_methods]
         if ms: model_options = sorted(ms, reverse=True)
         st.sidebar.success(f"Conectado: {len(model_options)} modelos.")
@@ -195,21 +197,40 @@ if api_key:
 
 selected_model = st.sidebar.selectbox("Modelo", model_options)
 
-st.title("📄 Analisador PTF + Relatório PDF")
-st.markdown("Carregue o PTF, analise com IA e **baixe o relatório oficial**.")
+st.title("📑 Analisador PTF Universal (PDF & Word)")
+st.markdown("Suporta documentos **Word** editáveis e **PDFs** (nativos).")
 
-uploaded_file = st.file_uploader("PTF (.docx)", type="docx")
+# Atualizado para aceitar 'pdf'
+uploaded_file = st.file_uploader("Carregue o PTF", type=["docx", "pdf"])
 
 if uploaded_file and api_key:
     if st.button("🚀 Analisar Documento", type="primary"):
-        with st.spinner("A gerar auditoria..."):
-            text = read_docx(uploaded_file)
-            res_str = analyze_ptf_expert(text, api_key, selected_model)
-            st.session_state['result_json'] = res_str
+        with st.spinner("A extrair texto e a auditar..."):
+            
+            # --- SELETOR DE FORMATO ---
+            file_type = uploaded_file.name.split('.')[-1].lower()
+            text_content = ""
+            
+            if file_type == 'pdf':
+                text_content = read_pdf(uploaded_file)
+            elif file_type == 'docx':
+                text_content = read_docx(uploaded_file)
+            
+            # --- CHECK DE TEXTO VAZIO (SCAN) ---
+            if len(text_content.strip()) < 50:
+                st.error("⚠️ O texto extraído é muito curto ou vazio.")
+                st.warning("""
+                Possível causa: O PDF é uma imagem (digitalização/scan) e não texto selecionável.
+                Esta APP requer PDFs com texto selecionável (nativos).
+                """)
+            else:
+                # Processamento Normal
+                st.info(f"Texto extraído com sucesso: {len(text_content)} caracteres.")
+                res_str = analyze_ptf_expert(text_content, api_key, selected_model)
+                st.session_state['result_json'] = res_str
 
     if 'result_json' in st.session_state:
         try:
-            # Processar JSON
             data = json.loads(clean_json_string(st.session_state['result_json']))
             if isinstance(data, dict) and "erro_sistema" in data:
                 st.error(data['erro_sistema'])
@@ -219,7 +240,6 @@ if uploaded_file and api_key:
 
                 df = pd.DataFrame(data)
                 
-                # Layout de Resultados
                 col_kpi, col_table = st.columns([1, 3])
                 
                 with col_kpi:
@@ -227,33 +247,22 @@ if uploaded_file and api_key:
                     st.metric("Total", len(df))
                     n_graves = len(df[df['gravidade'].str.contains('Alta', na=False)])
                     st.metric("Graves", n_graves, delta_color="inverse" if n_graves > 0 else "normal")
-                    
                     st.divider()
                     
-                    # === BOTÃO DE DOWNLOAD PDF ===
                     if not df.empty:
-                        pdf_bytes = create_pdf(df)
+                        pdf_bytes = create_pdf_report(df)
                         st.download_button(
-                            label="📄 Baixar Relatório PDF",
-                            data=pdf_bytes,
-                            file_name="relatorio_revisao_ptf.pdf",
-                            mime="application/pdf",
-                            help="Gera um documento PDF com todas as observações."
+                            "📄 Baixar Relatório PDF",
+                            pdf_bytes,
+                            "relatorio_auditoria.pdf",
+                            "application/pdf"
                         )
 
                 with col_table:
-                    st.subheader("Observações Detalhadas")
-                    st.dataframe(
-                        df, 
-                        column_config={
-                            "gravidade": st.column_config.TextColumn("Risco"),
-                            "sugestao": st.column_config.TextColumn("Sugestão Técnica")
-                        },
-                        use_container_width=True
-                    )
+                    st.dataframe(df, use_container_width=True, hide_index=True)
 
         except Exception as e:
-            st.error(f"Erro ao processar dados: {e}")
+            st.error(f"Erro no processamento: {e}")
 
 elif not api_key:
     st.info("Insira a API Key na barra lateral.")
