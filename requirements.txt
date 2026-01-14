@@ -3,4 +3,6 @@ python-docx
 google-generativeai
 pandas
 fpdf
+pypdf
+
 
