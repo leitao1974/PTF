@@ -11,18 +11,19 @@ import io
 import time
 
 # ==========================================
-# 1. BIBLIOTECA RJAIA
+# 1. BIBLIOTECA RJAIA (Base de Conhecimento)
 # ==========================================
 RJAIA_LIBRARY = {
     "Regime Geral": "DL 151-B/2013 alterado pelo DL 11/2023 (Simplex)",
-    "Taxas": "Portaria n.º 332-B/2015",
-    "Clima": "Lei de Bases do Clima (Lei 98/2021)",
-    "Prazos": "Atenção aos deferimentos tácitos do Simplex"
+    "Taxas": "Portaria n.º 332-B/2015 (atenção a valores antigos)",
+    "Clima": "Lei de Bases do Clima (Lei 98/2021) - obrigatório referir",
+    "Prazos": "Verificar deferimentos tácitos do Simplex (DL 11/2023)"
 }
 
 # ==========================================
-# 2. FUNÇÕES DE LEITURA
+# 2. FUNÇÕES DE LEITURA E CHUNKING
 # ==========================================
+
 def read_pdf_with_pages(file):
     try:
         reader = pypdf.PdfReader(file)
@@ -38,26 +39,17 @@ def read_pdf_with_pages(file):
 def read_docx(file):
     doc = Document(file)
     text = ""
-    # Adicionar marcadores artificiais para ajudar na localização
     for i, para in enumerate(doc.paragraphs):
         if para.text.strip():
-            # A cada 20 parágrafos, dá uma dica de localização aproximada
             if i % 20 == 0:
                 text += f"\n<<<PARÁGRAFO APROX. {i}>>>\n"
             text += f"{para.text}\n"
     return text
 
-# ==========================================
-# 3. MOTOR DE FATIAMENTO (CHUNKING) - A SOLUÇÃO
-# ==========================================
-def split_text_into_chunks(text, max_chars=15000):
-    """
-    Divide o texto em pedaços menores para não estourar o limite de resposta da IA.
-    Tenta cortar em quebras de linha para não partir palavras.
-    """
+def split_text_into_chunks(text, max_chars=12000):
+    """Divide o texto para não exceder limites da API."""
     chunks = []
     current_chunk = ""
-    
     paragraphs = text.split('\n')
     
     for para in paragraphs:
@@ -66,36 +58,28 @@ def split_text_into_chunks(text, max_chars=15000):
         else:
             chunks.append(current_chunk)
             current_chunk = para + "\n"
-            
     if current_chunk:
         chunks.append(current_chunk)
-        
     return chunks
 
 def repair_json(json_str):
-    """Tenta reparar JSON que foi cortado abruptamente (fallback)."""
+    """Tenta consertar JSON quebrado."""
     json_str = json_str.strip()
-    # Se não termina com ']', tenta fechar
     if not json_str.endswith(']'):
-        # Remove a última vírgula se houver e fecha
         json_str = json_str.rstrip(',').rstrip() 
-        # Tenta fechar a string se estiver aberta
-        if json_str.count('"') % 2 != 0:
-            json_str += '"'
-        # Tenta fechar o objeto se estiver aberto
-        if json_str.count('{') > json_str.count('}'):
-            json_str += '}'
-        # Fecha a lista
+        if json_str.count('"') % 2 != 0: json_str += '"'
+        if json_str.count('{') > json_str.count('}'): json_str += '}'
         json_str += ']'
     return json_str
 
 # ==========================================
-# 4. GERAÇÃO DE RELATÓRIOS
+# 3. GERAÇÃO DE RELATÓRIOS (PDF e WORD)
 # ==========================================
+
 class PDFReport(FPDF):
     def header(self):
         self.set_font('Arial', 'B', 12)
-        self.cell(0, 10, 'Relatorio Auditoria RJAIA', 0, 1, 'C')
+        self.cell(0, 10, 'Relatorio Auditoria PTF - RJAIA', 0, 1, 'C')
         self.ln(5)
     def footer(self):
         self.set_y(-15)
@@ -110,12 +94,18 @@ def create_pdf_audit(df):
     
     for index, row in df.iterrows():
         pdf.set_font('Arial', 'B', 10)
-        pdf.cell(0, 6, f"Loc: {safe(row.get('localizacao', '-'))} | {safe(row.get('categoria', '-'))}", 0, 1)
+        # Tenta pegar localizacao, se nao existir usa hifen
+        loc = safe(row.get('localizacao', '-'))
+        cat = safe(row.get('categoria', 'Geral'))
+        pdf.cell(0, 6, f"Local: {loc} | Tipo: {cat}", 0, 1)
+        
         pdf.set_font('Arial', '', 9)
         pdf.multi_cell(0, 5, safe(f"Orig: {row.get('texto_detetado', '')}"))
+        
         pdf.set_text_color(200, 0, 0)
         pdf.multi_cell(0, 5, safe(f"Sug: {row.get('sugestao', '')}"))
         pdf.set_text_color(0, 0, 0)
+        
         pdf.ln(2)
         pdf.line(10, pdf.get_y(), 200, pdf.get_y())
         pdf.ln(2)
@@ -125,8 +115,7 @@ def generate_corrected_docx(original_text, corrections_df):
     doc = Document()
     doc.add_heading('PTF - Versão Corrigida (IA)', 0)
     
-    # Normalização simples para tentar encontrar texto
-    # (Remover marcadores para a reconstrução do Word limpo)
+    # Limpar marcadores internos para o output final
     clean_text = re.sub(r'<<<.*?>>>', '', original_text)
     paragraphs = clean_text.split('\n')
     errors = corrections_df.to_dict('records')
@@ -135,25 +124,19 @@ def generate_corrected_docx(original_text, corrections_df):
         if not paragraph.strip(): continue
         p = doc.add_paragraph()
         
-        # Simples match (Case insensitive e parcial)
-        processed = False
-        
-        # Para evitar complexidade excessiva, verificamos se algum erro "chave" está neste parágrafo
-        # Num sistema produção real, usaríamos a biblioteca `diff_match_patch`
         matches = []
         for error in errors:
             bad = error.get('texto_detetado', '').strip()
             good = error.get('sugestao', '').strip()
-            if len(bad) > 5 and bad in paragraph:
+            # Validação básica para evitar falsos positivos em palavras curtas
+            if len(bad) > 4 and bad in paragraph:
                 matches.append((bad, good))
         
         if not matches:
             p.add_run(paragraph)
         else:
-            # Estratégia simples: pintar o parágrafo inteiro se tiver muitos erros
-            # ou tentar substituir o primeiro erro encontrado
-            bad, good = matches[0] # Pega o primeiro erro encontrado no parágrafo
-            
+            # Substituição simples (primeira ocorrência)
+            bad, good = matches[0]
             parts = paragraph.split(bad)
             if len(parts) > 1:
                 p.add_run(parts[0])
@@ -162,47 +145,35 @@ def generate_corrected_docx(original_text, corrections_df):
                 run_err.bold = True
                 p.add_run(parts[1])
             else:
-                p.add_run(paragraph) # Fallback
-
+                p.add_run(paragraph)
+    
     buffer = io.BytesIO()
     doc.save(buffer)
     buffer.seek(0)
     return buffer
 
 # ==========================================
-# 5. LÓGICA AI (GEMINI) - AGORA COM CHUNKS
+# 4. LÓGICA AI (Dinâmica)
 # ==========================================
 
-def get_library_context():
-    return json.dumps(RJAIA_LIBRARY, ensure_ascii=False, indent=2)
-
-def clean_json_string(json_str):
-    cleaned = re.sub(r"```json\s*", "", json_str)
-    cleaned = re.sub(r"```\s*$", "", cleaned)
-    return cleaned.strip()
-
 def analyze_chunk(chunk_text, api_key, model_name, library_context):
-    """Analisa apenas um pedaço do texto."""
+    """Envia um pedaço do texto para o modelo selecionado."""
     genai.configure(api_key=api_key)
     
     system_prompt = f"""
-    És um Revisor Técnico de AIA.
-    BIBLIOTECA: {library_context}
+    És um Especialista em RJAIA (Avaliação de Impacte Ambiental).
+    BIBLIOTECA LEGAL: {library_context}
     
-    Analisa este excerto de um PTF. Procura:
-    1. Gralhas e Erros Ortográficos.
-    2. Frases confusas ou sintaxe incorreta (sugere reescrita).
-    3. Referências legais erradas.
+    TAREFA: Analisa o texto fornecido e gera um JSON com erros.
+    1. Gralhas e Ortografia.
+    2. Sintaxe (frases confusas ou mal construídas).
+    3. Legal (referências erradas ou falta do Simplex DL 11/2023).
     
-    IMPORTANTE:
-    - O texto contém marcadores como <<<PÁGINA X>>>. Usa-os no campo 'localizacao'.
-    - Se o texto estiver cortado no início ou fim, ignora frases incompletas.
-    
-    OUTPUT JSON (Lista):
+    OUTPUT JSON (Lista de objetos):
     [
       {{
-        "localizacao": "Página X",
-        "categoria": "Sintaxe" (ou "Gralha", "Legislação"),
+        "localizacao": "Página X" (ou Parágrafo),
+        "categoria": "Sintaxe" (ou Legislação, Gralha),
         "gravidade": "Alta/Baixa",
         "texto_detetado": "...",
         "sugestao": "..."
@@ -213,117 +184,141 @@ def analyze_chunk(chunk_text, api_key, model_name, library_context):
     config = {
         "temperature": 0.1, 
         "response_mime_type": "application/json",
-        "max_output_tokens": 8192 # Máximo permitido
+        "max_output_tokens": 8192
     }
     
     try:
         model = genai.GenerativeModel(model_name=model_name, generation_config=config, system_instruction=system_prompt)
-        response = model.generate_content(f"Analisa este excerto:\n{chunk_text}")
+        response = model.generate_content(f"Analisa este trecho:\n{chunk_text}")
         return response.text
     except Exception as e:
         return f"ERROR: {str(e)}"
 
 # ==========================================
-# 6. INTERFACE STREAMLIT
+# 5. INTERFACE (FRONTEND)
 # ==========================================
 
-st.set_page_config(page_title="RJAIA Pro (Chunking)", page_icon="⚙️", layout="wide")
+st.set_page_config(page_title="RJAIA Lab", page_icon="🧪", layout="wide")
 
-st.sidebar.title("Configuração")
+st.sidebar.header("🔧 Configuração")
+
+# 1. Input da API Key
 api_key = st.sidebar.text_input("Google API Key", type="password")
-model_choice = st.sidebar.selectbox("Modelo", ["models/gemini-1.5-flash", "models/gemini-1.5-pro"])
 
-st.title("⚙️ Analisador RJAIA Robusto")
-st.markdown("Processamento por blocos (Chunking) para evitar erros em documentos grandes.")
+# 2. Deteção Dinâmica de Modelos
+available_models = []
+if api_key:
+    try:
+        genai.configure(api_key=api_key)
+        # Lista modelos e filtra apenas os que geram texto ('generateContent')
+        for m in genai.list_models():
+            if 'generateContent' in m.supported_generation_methods:
+                available_models.append(m.name)
+        
+        # Ordena para os "Pro" ou mais recentes aparecerem primeiro (normalmente ordem alfabetica inversa ajuda)
+        available_models.sort(reverse=True)
+        st.sidebar.success(f"Ligação OK! {len(available_models)} modelos detetados.")
+        
+    except Exception as e:
+        st.sidebar.error(f"Erro na chave: {e}")
 
-uploaded_file = st.file_uploader("Carregue PTF", type=["docx", "pdf"])
+# Se não detetar nada, usa uma lista fallback para não quebrar a UI
+if not available_models:
+    available_models = ["models/gemini-1.5-flash", "models/gemini-1.5-pro"]
+
+# 3. Dropdown de Seleção
+selected_model = st.sidebar.selectbox("Escolha o Modelo", available_models, index=0)
+
+
+st.title("🧪 Laboratório de Análise RJAIA")
+st.markdown(f"**Modelo Ativo:** `{selected_model}`")
+st.info("Faça upload do PTF para testar a performance deste modelo.")
+
+uploaded_file = st.file_uploader("PTF (Word ou PDF)", type=["docx", "pdf"])
 
 if uploaded_file and api_key:
-    if st.button("🚀 Iniciar Análise Profunda", type="primary"):
+    if st.button("🚀 Iniciar Análise", type="primary"):
         
-        # 1. Ler Texto
+        # --- Leitura ---
         fname = uploaded_file.name.lower()
-        full_text = ""
         if fname.endswith('.pdf'):
             full_text = read_pdf_with_pages(uploaded_file)
         else:
             full_text = read_docx(uploaded_file)
             
         if len(full_text) < 50:
-            st.error("Texto vazio ou ilegível.")
+            st.error("Texto demasiado curto ou ilegível (Scan?).")
             st.stop()
             
-        # 2. Fatiar (Chunking)
-        # Dividimos em blocos de 15.000 caracteres (aprox 5 páginas)
-        chunks = split_text_into_chunks(full_text, max_chars=15000)
-        
-        st.info(f"O documento foi dividido em {len(chunks)} blocos para análise segura.")
+        # --- Chunking ---
+        # Dividir em blocos de 12.000 caracteres para segurança
+        chunks = split_text_into_chunks(full_text, max_chars=12000)
+        st.write(f"Documento dividido em **{len(chunks)} blocos** para análise sequencial.")
         
         progress_bar = st.progress(0)
         master_results = []
-        library_ctx = get_library_context()
+        library_json = json.dumps(RJAIA_LIBRARY, ensure_ascii=False)
         
-        # 3. Processar cada fatia
+        # --- Processamento ---
         for i, chunk in enumerate(chunks):
-            with st.spinner(f"A analisar bloco {i+1} de {len(chunks)}..."):
-                raw_resp = analyze_chunk(chunk, api_key, model_choice, library_ctx)
+            with st.spinner(f"A analisar bloco {i+1}/{len(chunks)}..."):
+                raw_resp = analyze_chunk(chunk, api_key, selected_model, library_json)
                 
-                # Verificar erros de API
-                if raw_resp.startswith("ERROR"):
-                    st.warning(f"Falha no bloco {i+1}: {raw_resp}")
-                    continue
-                
-                try:
-                    cleaned = clean_json_string(raw_resp)
-                    # Tentar parse normal
+                if not raw_resp.startswith("ERROR"):
                     try:
-                        data = json.loads(cleaned)
-                    except json.JSONDecodeError:
-                        # Se falhar, tenta o reparo
-                        fixed = repair_json(cleaned)
-                        data = json.loads(fixed)
+                        # Limpeza e Parsing
+                        cleaned = re.sub(r"```json\s*|```\s*$", "", raw_resp).strip()
+                        try:
+                            data = json.loads(cleaned)
+                        except:
+                            data = json.loads(repair_json(cleaned))
                         
-                    if isinstance(data, dict): data = [data] # Normalização
-                    if isinstance(data, list):
-                        master_results.extend(data) # Adicionar à lista mestre
-                        
-                except Exception as e:
-                    st.warning(f"Não foi possível ler resultados do bloco {i+1}. Motivo: {e}")
+                        if isinstance(data, dict): data = [data]
+                        if isinstance(data, list): master_results.extend(data)
+                    except:
+                        # Se falhar um bloco, continua para o próximo
+                        pass
+                else:
+                    st.warning(f"Aviso no bloco {i+1}: {raw_resp}")
             
-            # Atualizar barra de progresso
             progress_bar.progress((i + 1) / len(chunks))
-            # Pausa curta para evitar rate limits se usar chave gratuita
-            time.sleep(1) 
+            time.sleep(1) # Pausa técnica para evitar rate limits na versão gratuita
             
-        st.success("Análise Completa!")
+        st.success("Análise completa!")
         
-        # 4. Mostrar Resultados Consolidados
-        if master_results:
-            df = pd.DataFrame(master_results)
-            
-            # Guardar em sessão
-            st.session_state['df_results'] = df
-            st.session_state['full_text'] = full_text
+        # Guardar resultados
+        st.session_state['results'] = pd.DataFrame(master_results)
+        st.session_state['text_ref'] = full_text
 
-# --- VISUALIZAÇÃO DOS RESULTADOS ---
-if 'df_results' in st.session_state:
-    df = st.session_state['df_results']
+# --- Resultados ---
+if 'results' in st.session_state:
+    df = st.session_state['results']
     
     if not df.empty:
         col1, col2 = st.columns([1, 2])
         
         with col1:
-            st.metric("Total Correções", len(df))
-            st.metric("Sintaxe", len(df[df['categoria'].astype(str).str.contains('Sintaxe', na=False)]))
+            st.metric("Total de Observações", len(df))
             
-            # Downloads
-            pdf_data = create_pdf_audit(df)
-            st.download_button("📄 Baixar Relatório (PDF)", pdf_data, "auditoria.pdf", "application/pdf")
+            # Botões de Download
+            pdf_out = create_pdf_audit(df)
+            st.download_button("📄 Relatório PDF", pdf_out, "auditoria.pdf", "application/pdf")
             
-            doc_data = generate_corrected_docx(st.session_state['full_text'], df)
-            st.download_button("📝 Baixar Word Corrigido", doc_data, "ptf_corrigido.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
-
+            doc_out = generate_corrected_docx(st.session_state['text_ref'], df)
+            st.download_button("📝 Word c/ Correções", doc_out, "ptf_corrigido.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document")
+            
         with col2:
-            st.dataframe(df, use_container_width=True)
+            st.dataframe(
+                df, 
+                column_config={
+                    "localizacao": "Local",
+                    "texto_detetado": "Original",
+                    "sugestao": "Sugestão"
+                },
+                use_container_width=True
+            )
     else:
-        st.warning("Nenhum erro encontrado (ou houve falha na leitura dos blocos).")
+        st.warning("O modelo não encontrou erros ou não conseguiu gerar uma resposta válida.")
+
+elif not api_key:
+    st.info("👈 Por favor, insira a sua Google API Key na barra lateral para começar.")
